@@ -28,7 +28,7 @@ class Validator(object):
         Appends a result to validation.results.
 
         :param unit: a content unit to validate
-        :type unit: pulp.server.db.model.FileContentUnit
+        :type unit: dict
         :returns: None
         """
         if not self.applicable(unit):
@@ -36,7 +36,7 @@ class Validator(object):
 
         try:
             self.validate(unit, validation)
-        except ValidationError as exc:
+        except (AssertionError, ValidationError) as exc:
             repository = getattr(exc, 'repository', None)
             validation.results.append(ValidationFailure(self, unit, repository, exc))
         else:
@@ -46,16 +46,16 @@ class Validator(object):
         """Check if this validator is applicable to the unit.
 
         :param unit: the unit being checked
-        :type unit: pulp.server.db.model.FileContentUnit
+        :type unit: dict
         :return: True/False
         """
-        return isinstance(unit, model.FileContentUnit)
+        return True
 
     def validate(self, unit, validation):
         """Check the unit in the context of the ongoing validation.
 
         :param unit: the unit to be checked
-        :type unit: pulp.server.db.model.FileContentUnit
+        :type unit: dict
         :returns: None
         :raises: ValidationError in case validation didn't pass as expected
         """
@@ -80,6 +80,40 @@ class Validator(object):
         """
         pass
 
+    @staticmethod
+    def get_unit_attribute(unit, attr_name):
+        """Get attribute from a unit.
+
+        Asserts the attribute value isn't None.
+
+        :param unit: the unit to get the attribute value from
+        :type unit: dict
+        :param attr_name: name of the attribute to get
+        :type attr: basestring
+        :raises: AssertionError
+        :returns: the unit attribute value
+        """
+        value = unit.get(attr_name)
+        assert value is not None, (
+            'A unit without the "{}" attribute encountered'.format(attr_name))
+        return value
+
+    @staticmethod
+    def get_unit_attributes(unit, *attributes):
+        """Get unit attributes.
+
+        Asserts none of the attribute values is None.
+
+        :param unit: the unit to get the attribute values from
+        :type unit: dict
+        :param attributes: the attribute names to use
+        :type attributes: a list of basestrings
+        :raises: AssertionError
+        :returns: an iterator over the list of attribute values
+        """
+        for attribute in attributes:
+            yield Validator.get_unit_attribute(unit, attribute)
+
 
 class MultiValidator(Validator):
     def __call__(self, unit, validation):
@@ -88,7 +122,7 @@ class MultiValidator(Validator):
         Extends the valiation.results with calculated results.
 
         :param unit: a content unit to validate
-        :type unit: pulp.server.db.model.FileContentUnit
+        :type unit: dict
         :returns: None
         """
         if not self.applicable(unit):
@@ -110,7 +144,7 @@ class MultiValidator(Validator):
             def inner(self, unit, validation, *args, **kwargs):
                 try:
                     func(self, unit, validation, *args, **kwargs)
-                except ValidationError as exc:
+                except (AssertionError, ValidationError) as exc:
                     for repo_id in validation.repo_ids(unit):
                         yield failure_factory(self, unit, repo_id, exc)
                 else:
@@ -182,10 +216,11 @@ class Validation(object):
         # only validators on the same "level" are executed in case of a failure.
         if self._repo_ids is not None:
             return self._repo_ids
+        unit_id = Validator.get_unit_attribute(unit, '_id')
 
         self._repo_ids =[
-            repo.repo_id for repo in model.RepositoryContentUnit.objects(
-                unit_id=unit.id).only('repo_id')
+            repo.get('repo_id') for repo in model.RepositoryContentUnit.objects(
+                unit_id=unit_id).only('repo_id').as_pymongo()
         ]
         return self._repo_ids
 
@@ -206,7 +241,7 @@ class Validation(object):
         Validator unit results are appended to the results parameter.
 
         :param unit: the unit to validate
-        :type unit: pulp.server.db.model.FileContentUnit
+        :type unit: dict
         :param result: the results list being build during the validation
         :type result: a list of validation results
         :returns: None

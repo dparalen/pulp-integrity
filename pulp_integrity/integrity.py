@@ -1,6 +1,7 @@
 import argparse
 import pkg_resources
 import pyparsing as pp
+from pymongo import ReadPreference
 import sys
 
 from pulp.plugins.loader import manager
@@ -9,6 +10,17 @@ import pulp.server.db.model as model
 
 from pulp_integrity.validator import Validation
 
+
+UNIT_FIELDS = [
+    'size',
+    'checksum',
+    'checksumtype',
+    '_storage_path',
+    'id',
+    'filename',
+    'downloaded',
+    '_content_type_id',
+]
 
 class ValidationFactoryMixin(object):
     """Common interface for a validation CLI argument parser that works as a validation factory."""
@@ -259,8 +271,15 @@ def print_unit_field(field, value):
     :type value: pulp.server.db.model.FileContentUnit
     :returns: None
     """
-    print '    "{}": "{}" ,'.format(field, value)
-    print '    "unit_id": "{}"'.format(value.id),
+    _content_type_id = value.get('_content_type_id')
+    filename = value.get('filename')
+    checksum = value.get('checksum')
+    print '    "{}": "{}{}{}" ,'.format(
+        field,
+        '{}: '.format(_content_type_id) if _content_type_id else '',
+        filename or '<no-filename>',
+        '-{}'.format(checksum) if checksum else '')
+    print '    "unit_id": "{}"'.format(value.get('_id')),
 
 
 def print_repo_field_value(field, value):
@@ -339,7 +358,12 @@ def main():
     ParsingValidationFactory.load()
     ParsingValidationFactory.register(validation_parser)
 
-    args = argparser.parse_args()
+    try:
+        args = argparser.parse_args()
+    except Exception as exc:
+        print >> sys.stderr, exc
+        return 2
+
     if not hasattr(args, 'validation_struct'):
         argparser.error('No checks specified')
 
@@ -355,7 +379,7 @@ def main():
 
     # get report for all supported units
     for modelname in args.models:
-        for unit in args.models[modelname].objects:
+        for unit in args.models[modelname].objects.only(*UNIT_FIELDS).read_preference(ReadPreference.NEAREST).as_pymongo():
             validation = Validation.from_iterable(args.validation_struct)
             validation(unit)
             for result in validation.results:

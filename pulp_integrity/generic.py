@@ -40,12 +40,13 @@ class DownloadedFileContentUnitValidator(validator.MultiValidator):
         """This validator is applicable to downloaded units only.
 
         :param unit: the unit being checked
-        :type unit: pulp.server.db.model.FileContentUnit
+        :type unit: dict
         :returns: True/False
         """
+        downloaded = unit.get('downloaded')
         return (
             super(DownloadedFileContentUnitValidator, self).applicable(unit) and
-            unit.downloaded
+            downloaded
         )
 
     @staticmethod
@@ -55,18 +56,19 @@ class DownloadedFileContentUnitValidator(validator.MultiValidator):
         :param validator: the validator that checked the units
         :type validator: pulp_integrity.validation.Validator
         :param: unit: the unit that failed the validation
-        :type unit: pulp.server.db.model.FileContentUnit
+        :type unit: dict
         :param repository: repo_id to link this failure to
         :type repository: basestring
         :param error: the ValidationError that occurred during the validation
         :type error: a ValidationError object
         :returns: a UnitPathFailure object
         """
-        return UnitPathFailure(validator, unit, repository, error, unit.storage_path)
+        _storage_path = Validator.get_unit_attribute('_storage_path')
+        return UnitPathFailure(validator, unit, repository, error, _storage_path)
 
 
 class ExistenceValidator(DownloadedFileContentUnitValidator):
-    """Check that the unit.storage_path exists on the disk."""
+    """Check that the unit._storage_path exists on the disk."""
 
     @validator.MultiValidator.affects_repositories(
         failure_factory=DownloadedFileContentUnitValidator.failure_factory)
@@ -74,17 +76,18 @@ class ExistenceValidator(DownloadedFileContentUnitValidator):
         """Check the unit.
 
         :param unit: the unit to check
-        :type unit: pulp.server.db.model.FileContentUnit
+        :type unit: dict
         :param args: unused
         :returns: None
         :raises: MISSING_ERROR
         """
-        if not path.exists(unit.storage_path):
+        _storage_path = Validator.get_unit_attribute('_storage_path')
+        if not path.exists(_storage_path):
             raise MISSING_ERROR
 
 
 class SizeValidator(DownloadedFileContentUnitValidator):
-    """Check that the unit.storage_path size matches the unit.size."""
+    """Check that the unit._storage_path size matches the unit.size."""
 
     @validator.MultiValidator.affects_repositories(
         failure_factory=DownloadedFileContentUnitValidator.failure_factory)
@@ -92,21 +95,24 @@ class SizeValidator(DownloadedFileContentUnitValidator):
         """Check the unit.
 
         :param unit: the unit to check
-        :type unit: pulp.server.db.model.FileContentUnit
+        :type unit: dict
         :param args: unused
         :returns: None
         :raises: MISSING_ERROR/SIZE_ERROR
         """
+        _storage_path, unitsize =  self.get_unit_attributes(
+            unit, '_storage_path', 'size')
         try:
-            unit.verify_size(unit.storage_path)
+           storagesize = path.getsize(_storage_path)
         except (IOError, OSError):
             raise MISSING_ERROR
-        except verification.VerificationException as exc:
+
+        if unitsize != storagesize:
             raise SIZE_ERROR
 
 
 class ChecksumValidator(DownloadedFileContentUnitValidator):
-    """Check that the unit.storage_path checksum matches the unit.checksum."""
+    """Check that the unit._storage_path checksum matches the unit.checksum."""
 
     @validator.MultiValidator.affects_repositories(
         failure_factory=DownloadedFileContentUnitValidator.failure_factory)
@@ -114,17 +120,19 @@ class ChecksumValidator(DownloadedFileContentUnitValidator):
         """Check the unit.
 
         :param unit: the unit to check
-        :type unit: pulp.server.db.model.FileContentUnit
+        :type unit: dict
         :param args: unused
         :returns: None
         :raises: MISSING_ERROR/CHECKSUM_ERROR
         """
+        checksumtype, expected_checksum, _storage_path = self.get_unit_attributes(
+            unit, 'checksumtype', 'expected_checksum', '_storage_path')
         try:
-            with open(unit.storage_path, 'rb') as fd:
-                checksums = util.calculate_checksums(fd, [unit.checksumtype])
+            with open(_storage_path, 'rb') as fd:
+                checksums = util.calculate_checksums(fd, [checksumtype])
         except (IOError, OSError):
             raise MISSING_ERROR
-        if unit.checksum != checksums[unit.checksumtype]:
+        if checksums[checksumtype] != expected_checksum:
             raise CHECKSUM_ERROR
 
 
@@ -135,12 +143,13 @@ class DarkContentValidator(validator.MultiValidator):
         """This validator is applicable to downloaded units only.
 
         :param unit: the unit to check applicability of
-        :type unit: pulp.server.db.model.FileContentUnit
+        :type unit: dict
         :returns: True/False
         """
+        downloaded = unit.get('downloaded')
         return (
             super(DarkContentValidator, self).applicable(unit) and
-            unit.downloaded
+            downloaded
         )
 
     def __init__(self):
@@ -171,18 +180,19 @@ class DarkContentValidator(validator.MultiValidator):
     def validate(self, unit, *args):
         """Check the unit.
 
-        Remove unit.storage_path from self.filenames to account for every filename under
+        Remove unit._storage_path from self.filenames to account for every filename under
         /var/lib/pulp/content/units/
 
         :param unit: the unit to check
-        :type unit: pulp.server.db.model.FileContentUnit
+        :type unit: dict
         :param args: unused
         :returns: None
         :raises: MISSING_ERROR
         """
+        _storage_path = self.get_unit_attribute(unit, '_storage_path')
         # A FileContentUnit has exactly a single storage path
         try:
-            self.paths.remove(unit.storage_path)
+            self.paths.remove(_storage_path)
         except KeyError as exc:
             # double remove should not happen
             raise MISSING_ERROR
@@ -193,5 +203,5 @@ class DarkContentValidator(validator.MultiValidator):
 
         :returns: an iterable over DarkPath validation results
         """
-        for storage_path in self.paths:
-            yield validator.DarkPath(self, storage_path, DARK_CONTENT)
+        for path in self.paths:
+            yield validator.DarkPath(self, path, DARK_CONTENT)
