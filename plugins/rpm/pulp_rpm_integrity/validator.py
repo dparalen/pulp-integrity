@@ -21,7 +21,7 @@ SymlinkFailure.__nonzero__ = staticmethod(lambda: False)
 
 
 class YumDistributorValidatorMixin(object):
-    applicable_types = {'rpm', 'srpm', 'drpm'}
+    applicable_types = set(['rpm', 'srpm', 'drpm'])
 
     def __init__(self):
         # the count of repositories&distributors is small compared to the count of units
@@ -34,13 +34,29 @@ class YumDistributorValidatorMixin(object):
         Only the self.applicable_types are relevant.
 
         :param unit: the content unit to check applicability of
-        :type unit: pulp.server.db.model.FileContentUnit
+        :type unit: dict
         :return: True/False
         """
-        if not isinstance(unit, model.FileContentUnit) or (
-                unit.type_id not in self.applicable_types):
+        _content_type_id = unit.get('_content_type_id')
+        if _content_type_id not in self.applicable_types:
             return False
         return True
+
+    def setup(self, *args):
+        """Cache unit_id -> [repo_id, ...] mappings to save some bandwitdht."""
+        self.unit_id_repos = {}
+        for mapping in model.RepositoryContentUnit.objects.only('repo_id', 'unit_id').aggregate(
+            {'$match': {'unit_type_id': {'$in': list(self.applicable_types)}}},
+            {'$group': {'_id': '$unit_id', 'repo_ids': {'$push': '$repo_id'}}},
+            allowDiskUse=True
+	):
+            self.unit_id_repos.setdefault(mapping['_id'], mapping['repo_ids'])
+
+        # This cache size is 6M for 160k records on my test system
+        # and takes approx 5s to set up
+        # import sys
+        # print('Caching {} relations'.format(len(self.unit_id_repos)))
+        # print('Size {} MiB'.format(sys.getsizeof(self.unit_id_repos) // 1024**2))
 
     def get_distributors(self, validation, unit):
         """Get a (cached) unit/repo distributor.
@@ -50,10 +66,16 @@ class YumDistributorValidatorMixin(object):
         :param validation: currently ongoing validation
         :type validation: pulp_integrity.validation.Validation
         :param unit: the content unit being checked
-        :type unit: pulp.server.db.model.FileContentUnit
+        :type unit: dict
         :return: pulp.server.db.model.Distributor object
         """
-        for repo_id in validation.repo_ids(unit):
+        unit_id = self.get_unit_attribute(unit, '_id')
+        repo_ids = self.unit_id_repos.get(unit_id, [])
+        if not  repo_ids:
+            # cache miss
+            repo_ids = self.unit_id_repos[unit_id] = self.validation.repo_ids(unit)
+
+        for repo_id in repo_ids:
             try:
                 distributor = self.repo_cache[repo_id]
             except KeyError:
@@ -69,7 +91,7 @@ class BrokenSymlinksValidator(validator.MultiValidator, YumDistributorValidatorM
     """Validates pulp_rpm-specific unit types: rpm, drpm, srpm.
 
     This validator detects whether a unit in a published repo has a symlink pointing to its
-    storage_path. There are two cases of expected, published symlink locations,
+    _storage_path. There are two cases of expected, published symlink locations,
     if the yum_distributor is used:
       - repository/<unit.filename>; the old-style
       - repository/packages/<unit.filename[0].to_lower()>/unit.filename; the new-style
@@ -84,26 +106,27 @@ class BrokenSymlinksValidator(validator.MultiValidator, YumDistributorValidatorM
         self.missing_error = MissingSymlinkError('The unit has a missing symlink.')
 
     applicable = YumDistributorValidatorMixin.applicable
+    setup = YumDistributorValidatorMixin.setup
 
     @staticmethod
-    def old_symlink_name(unit):
+    def old_symlink_name(filename):
         """Just the basename of unit.filename.
 
-        :param unit: the unit being checked
-        :type unit: pulp.server.db.model.FileContentUnit
+        :param filename: filename of a unit being checked
+        :type unit: basestring
         :return: the path
         """
-        return os.path.basename(unit.filename)
+        return os.path.basename(filename)
 
     @staticmethod
-    def new_symlink_name(unit):
+    def new_symlink_name(filename):
         """The Packages/p/parrot.rpm style path.
 
-        :param unit: the unit being checked
-        :type unit: pulp.server.db.model.FileContentUnit
+        :param filename: the filename of a unit being checked
+        :type filename: basestring
         :return: the path
         """
-        filename = os.path.basename(unit.filename)
+        filename = os.path.basename(filename)
         return os.path.join('Packages', filename[0].lower(), filename)
 
     def check_link(self, check_func, unit, repository, link):
@@ -114,7 +137,7 @@ class BrokenSymlinksValidator(validator.MultiValidator, YumDistributorValidatorM
         :param check_func: a function that implements the link checking
         :type check_func: callable(path)
         :param unit: the unit being checked
-        :type unit: pulp.server.db.model.FileContentUnit
+        :type unit: dict
         :param repository: the repo_id of the repo where the unit symlink is expected to be found
         :type repository: basestring
         :param link: the unit symlink being checked
@@ -131,7 +154,7 @@ class BrokenSymlinksValidator(validator.MultiValidator, YumDistributorValidatorM
         :param check_func: a function that implements the link checking
         :type func: callable(path)
         :param unit: the unit being checked
-        :type unit: pulp.server.db.model.FileContentUnit
+        :type unit: dict
         :param repository: the repo_id of the repo where the unit symlink is expected to be found
         :type repository: basestring
         :param publish_dir: a directory where the symlink is  expected to be found
@@ -140,8 +163,9 @@ class BrokenSymlinksValidator(validator.MultiValidator, YumDistributorValidatorM
         :type relative_url: basestring(path)
         :return: validator.ValidationSuccess/SymlinkFailure
         """
-        old_link = os.path.join(publish_dir, relative_url, self.old_symlink_name(unit))
-        new_link = os.path.join(publish_dir, relative_url, self.new_symlink_name(unit))
+        filename = self.get_unit_attribute(unit, 'filename')
+        old_link = os.path.join(publish_dir, relative_url, self.old_symlink_name(filename))
+        new_link = os.path.join(publish_dir, relative_url, self.new_symlink_name(filename))
 
         try:
             return self.check_link(check_func, unit, repository, new_link)
@@ -160,16 +184,18 @@ class BrokenSymlinksValidator(validator.MultiValidator, YumDistributorValidatorM
         target. Only published repository yum_distributors are considered.
 
         :param unit: the unit being checked
-        :type unit: pulp.server.db.model.FileContentUnit
+        :type unit: dict
         :param validation: the currently ongoing unit validation
         :type validation: pulp_integrity.validation.Validation
         :return: [pulp_integrity.validation.ValidationSuccess/SymlinkFailure, ...]
         """
         # select a checking function based on whether the unit is downloaded or not
+        downloaded, _storage_path  = self.get_unit_attributes(
+            unit, 'downloaded', '_storage_path')
         check_func = (
-            unit.downloaded and
+            downloaded and
             (lambda link: os.path.exists(os.readlink(link))
-             and os.path.samefile(link, unit.storage_path)) or
+             and os.path.samefile(link, _storage_path)) or
             # just raise OSError in case the link is missing
             os.lstat
         )
