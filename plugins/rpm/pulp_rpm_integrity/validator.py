@@ -42,6 +42,22 @@ class YumDistributorValidatorMixin(object):
             return False
         return True
 
+    def setup(self, *args):
+        """Cache unit_id -> [repo_id, ...] mappings to save some bandwitdht."""
+        self.unit_id_repos = {}
+        for mapping in model.RepositoryContentUnit.objects.only('repo_id', 'unit_id').aggregate(
+            {'$match': {'unit_type_id': {'$in': list(self.applicable_types)}}},
+            {'$group': {'_id': '$unit_id', 'repo_ids': {'$push': '$repo_id'}}},
+            allowDiskUse=True
+	):
+            self.unit_id_repos.setdefault(mapping['_id'], mapping['repo_ids'])
+
+        # This cache size is 6M for 160k records on my test system
+        # and takes approx 5s to set up
+        # import sys
+        # print('Caching {} relations'.format(len(self.unit_id_repos)))
+        # print('Size {} MiB'.format(sys.getsizeof(self.unit_id_repos) // 1024**2))
+
     def get_distributors(self, validation, unit):
         """Get a (cached) unit/repo distributor.
 
@@ -53,7 +69,13 @@ class YumDistributorValidatorMixin(object):
         :type unit: dict
         :return: pulp.server.db.model.Distributor object
         """
-        for repo_id in validation.repo_ids(unit):
+        unit_id = self.get_unit_attribute(unit, '_id')
+        repo_ids = self.unit_id_repos.get(unit_id, [])
+        if not  repo_ids:
+            # cache miss
+            repo_ids = self.unit_id_repos[unit_id] = self.validation.repo_ids(unit)
+
+        for repo_id in repo_ids:
             try:
                 distributor = self.repo_cache[repo_id]
             except KeyError:
@@ -84,6 +106,7 @@ class BrokenSymlinksValidator(validator.MultiValidator, YumDistributorValidatorM
         self.missing_error = MissingSymlinkError('The unit has a missing symlink.')
 
     applicable = YumDistributorValidatorMixin.applicable
+    setup = YumDistributorValidatorMixin.setup
 
     @staticmethod
     def old_symlink_name(filename):
