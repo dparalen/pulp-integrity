@@ -2,6 +2,7 @@ import argparse
 import pkg_resources
 import pyparsing as pp
 from pymongo import ReadPreference
+from mongoengine.errors import LookUpError
 import sys
 
 from pulp.plugins.loader import manager
@@ -21,6 +22,7 @@ UNIT_FIELDS = [
     'downloaded',
     '_content_type_id',
 ]
+
 
 class ValidationFactoryMixin(object):
     """Common interface for a validation CLI argument parser that works as a validation factory."""
@@ -188,16 +190,21 @@ class ModelsFactory(argparse.Action):
     models = {}
 
     @classmethod
-    def add_model(cls, model_name, model):
+    def add_model(cls, unit_model_name, unit_model):
         """Register the content model with this class.
 
-        :param model_name: name of the model to use; entrypoint
-        :type model_name: basestring
-        :param model: the pulp DB model instance
-        :type model: pulp.server.db.model.FileContentUnit
+        Only FileContentUnit subclasses are considered.
+
+        :param unit_model_name: name of the model to use; entrypoint
+        :type unit_model_name: basestring
+        :param unit_model: the pulp DB model instance
+        :type unit_model: pulp.server.db.model.FileContentUnit
         :returns: None
         """
-        cls.model_types[model_name] = model
+        if not issubclass(unit_model, model.FileContentUnit):
+            return
+
+        cls.model_types[unit_model_name] = unit_model
 
     @classmethod
     def load(cls):
@@ -342,6 +349,40 @@ def print_result(result, first):
     print '\n  }',
 
 
+class ModelIntrospectionError(Exception):
+    """Something gone wrong with the model introspection."""
+
+
+def _model_field_from_lookup_err(err):
+    # process e.g: Cannot resolve field "foo" into a model field name
+    try:
+        return str(err).split('"')[1].strip()
+    except IndexError:
+        raise ModelIntrospectionError('Incompatible error encountered: {}'.format(err))
+
+
+def curated_model_fields(model):
+    """Figure out what fields from the UNIT_FIELDS a model supports.
+
+    :param model: the model to introspect
+    :type model: pulp.server.db.model.FileContentUnit
+    :returns: a curated set of field names
+    """
+    ret = set(UNIT_FIELDS)
+    while True:
+        try:
+            model.objects.only(*ret)
+        except LookUpError as exc:
+            try:
+                ret.remove(_model_field_from_lookup_err(exc))
+            except KeyError:
+                raise ModelIntrospectionError(
+                    'Encountered same lookup error twice: {}'.format(exc))
+        else:
+            # found the largest set of acceptable field names
+            return ret
+
+
 def main():
     exit_code = 0
 
@@ -379,7 +420,10 @@ def main():
 
     # get report for all supported units
     for modelname in args.models:
-        for unit in args.models[modelname].objects.only(*UNIT_FIELDS).read_preference(ReadPreference.NEAREST).as_pymongo():
+        model = args.models[modelname]
+        model_fields = curated_model_fields(model)
+        for unit in model.objects.only(*model_fields).read_preference(
+                ReadPreference.NEAREST).as_pymongo():
             validation = Validation.from_iterable(args.validation_struct)
             validation(unit)
             for result in validation.results:
