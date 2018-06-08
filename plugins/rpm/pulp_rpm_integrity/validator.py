@@ -38,18 +38,16 @@ class YumDistributorValidatorMixin(object):
         :return: True/False
         """
         _content_type_id = unit.get('_content_type_id')
-        if _content_type_id not in self.applicable_types:
-            return False
-        return True
+        return _content_type_id in self.applicable_types
 
     def setup(self, *args):
         """Cache unit_id -> [repo_id, ...] mappings to save some bandwitdht."""
         self.unit_id_repos = {}
-        for mapping in model.RepositoryContentUnit.objects.only('repo_id', 'unit_id').aggregate(
-            {'$match': {'unit_type_id': {'$in': list(self.applicable_types)}}},
-            {'$group': {'_id': '$unit_id', 'repo_ids': {'$push': '$repo_id'}}},
-            allowDiskUse=True
-	):
+        for mapping in model.RepositoryContentUnit.objects.aggregate(
+                {'$match': {'unit_type_id': {'$in': list(self.applicable_types)}}},
+                {'$group': {'_id': '$unit_id', 'repo_ids': {'$push': '$repo_id'}}},
+                allowDiskUse=True
+        ):
             self.unit_id_repos.setdefault(mapping['_id'], mapping['repo_ids'])
 
         # This cache size is 6M for 160k records on my test system
@@ -71,19 +69,15 @@ class YumDistributorValidatorMixin(object):
         """
         unit_id = self.get_unit_attribute(unit, '_id')
         repo_ids = self.unit_id_repos.get(unit_id, [])
-        if not  repo_ids:
-            # cache miss
-            repo_ids = self.unit_id_repos[unit_id] = self.validation.repo_ids(unit)
 
         for repo_id in repo_ids:
             try:
                 distributor = self.repo_cache[repo_id]
             except KeyError:
-                self.repo_cache[repo_id] = model.Distributor.objects.get(
+                self.repo_cache[repo_id] = distributor = model.Distributor.objects.get(
                     repo_id=repo_id,
                     distributor_type_id='yum_distributor'
                 )
-                distributor = self.repo_cache[repo_id]
             yield distributor, repo_id
 
 

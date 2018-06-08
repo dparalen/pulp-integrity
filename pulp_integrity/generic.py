@@ -63,7 +63,7 @@ class DownloadedFileContentUnitValidator(validator.MultiValidator):
         :type error: a ValidationError object
         :returns: a UnitPathFailure object
         """
-        _storage_path = Validator.get_unit_attribute('_storage_path')
+        _storage_path = validator.get_unit_attribute(unit, '_storage_path')
         return UnitPathFailure(validator, unit, repository, error, _storage_path)
 
 
@@ -81,13 +81,22 @@ class ExistenceValidator(DownloadedFileContentUnitValidator):
         :returns: None
         :raises: MISSING_ERROR
         """
-        _storage_path = Validator.get_unit_attribute('_storage_path')
+        _storage_path = self.get_unit_attribute(unit, '_storage_path')
         if not path.exists(_storage_path):
             raise MISSING_ERROR
 
 
 class SizeValidator(DownloadedFileContentUnitValidator):
     """Check that the unit._storage_path size matches the unit.size."""
+
+    def applicable(self, unit):
+        """Only applicable to units having the size key.
+
+        :param unit: the unit applicability of which is being checked
+        :type unit: dict
+        :returns: True/False
+        """
+        return super(SizeValidator, self).applicable(unit) and 'size' in unit
 
     @validator.MultiValidator.affects_repositories(
         failure_factory=DownloadedFileContentUnitValidator.failure_factory)
@@ -100,10 +109,10 @@ class SizeValidator(DownloadedFileContentUnitValidator):
         :returns: None
         :raises: MISSING_ERROR/SIZE_ERROR
         """
-        _storage_path, unitsize =  self.get_unit_attributes(
+        _storage_path, unitsize = self.get_unit_attributes(
             unit, '_storage_path', 'size')
         try:
-           storagesize = path.getsize(_storage_path)
+            storagesize = path.getsize(_storage_path)
         except (IOError, OSError):
             raise MISSING_ERROR
 
@@ -113,6 +122,16 @@ class SizeValidator(DownloadedFileContentUnitValidator):
 
 class ChecksumValidator(DownloadedFileContentUnitValidator):
     """Check that the unit._storage_path checksum matches the unit.checksum."""
+
+    def applicable(self, unit):
+        """Only applicable to units having the checksum and the checksumtype keys.
+
+        :param unit: the unit applicability of which is being checked
+        :type unit: dict
+        :returns: True/False
+        """
+        return (super(ChecksumValidator, self).applicable(unit) and
+                'checksum' in unit and 'checksumtype' in unit)
 
     @validator.MultiValidator.affects_repositories(
         failure_factory=DownloadedFileContentUnitValidator.failure_factory)
@@ -126,7 +145,7 @@ class ChecksumValidator(DownloadedFileContentUnitValidator):
         :raises: MISSING_ERROR/CHECKSUM_ERROR
         """
         checksumtype, expected_checksum, _storage_path = self.get_unit_attributes(
-            unit, 'checksumtype', 'expected_checksum', '_storage_path')
+            unit, 'checksumtype', 'checksum', '_storage_path')
         try:
             with open(_storage_path, 'rb') as fd:
                 checksums = util.calculate_checksums(fd, [checksumtype])
@@ -203,5 +222,5 @@ class DarkContentValidator(validator.MultiValidator):
 
         :returns: an iterable over DarkPath validation results
         """
-        for path in self.paths:
-            yield validator.DarkPath(self, path, DARK_CONTENT)
+        for storage_path in self.paths:
+            yield validator.DarkPath(self, storage_path, DARK_CONTENT)
